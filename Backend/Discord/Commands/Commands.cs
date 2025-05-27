@@ -34,7 +34,6 @@ public partial class Commands
             { "help", HjælpCommand },
             { "info", InfoCommand },
             { "rank", RankCommand },
-            { "register", RegisterCommand },
             { "givexp", GiveXPCommand },
             { "testxp", TestXPCommand },
             { "daily", DailyCommand },
@@ -92,7 +91,6 @@ public partial class Commands
             .AddField($"{prefix}help", "Vis denne hjælpebesked")
             .AddField($"{prefix}info", "Vis information om botten")
             .AddField($"{prefix}rank", "Vis din rang og XP")
-            .AddField($"{prefix}register", "Registrer din Discord-konto")
             .AddField($"{prefix}givexp", "Giv XP til en bruger")
             .AddField($"{prefix}testxp", "Test XP-systemet")
             .AddField($"{prefix}daily", "Få daglig XP-bonus")
@@ -157,82 +155,6 @@ public partial class Commands
             }
 
             await message.Channel.SendMessageAsync(embed: embed.Build());
-        }
-    }
-
-    // Register kommando - !register
-    private static async Task RegisterCommand(SocketMessage message, DiscordSocketClient client)
-    {
-        if (_serviceProvider == null)
-        {
-            await message.Channel.SendMessageAsync("Fejl: Service provider er ikke konfigureret.");
-            return;
-        }
-
-        // Tjek om beskeden er fra en guild
-        if (message.Channel is not SocketGuildChannel guildChannel)
-        {
-            await message.Channel.SendMessageAsync("Denne kommando kan kun bruges på en server.");
-            return;
-        }
-
-        // Få fat i guild user
-        var guildUser = (message.Author as SocketGuildUser);
-        if (guildUser == null)
-        {
-            await message.Channel.SendMessageAsync("Kunne ikke finde dig som server-medlem.");
-            return;
-        }
-
-        using (var scope = _serviceProvider.CreateScope())
-        {
-            var userService = scope.ServiceProvider.GetRequiredService<UserService>();
-            var xpService = scope.ServiceProvider.GetRequiredService<XPService>();
-
-            try
-            {
-                // Opret eller hent bruger
-                var user = await userService.CreateDiscordUserAsync(guildUser);
-                bool isNewUser = user.CreatedAt > DateTime.UtcNow.AddMinutes(-1);
-
-                // Giv XP for registrering hvis det er en ny bruger
-                if (isNewUser)
-                {
-                    await xpService.AddXPAsync(guildUser.Id.ToString(), XPActivityType.DailyLogin);
-                }
-
-                // Byg embed besked
-                var embed = new EmbedBuilder()
-                    .WithTitle(
-                        isNewUser ? "Velkommen til Mercantec Space!" : "Du er allerede registreret!"
-                    )
-                    .WithDescription(
-                        isNewUser
-                            ? "Din Discord-konto er nu registreret i vores system. Du kan nu optjene XP og stige i level!"
-                            : "Din Discord-konto er allerede registreret i vores system."
-                    )
-                    .WithColor(isNewUser ? Color.Green : Color.Blue)
-                    .WithThumbnailUrl(guildUser.GetAvatarUrl() ?? guildUser.GetDefaultAvatarUrl())
-                    .WithCurrentTimestamp();
-
-                if (isNewUser)
-                {
-                    embed.AddField(
-                        "Næste skridt",
-                        "Senere vil du kunne forbinde din konto med vores hjemmeside for at få adgang til flere funktioner."
-                    );
-                    embed.AddField(
-                        "XP System",
-                        "Du optjener XP ved at være aktiv på serveren. Brug !rank for at se dit level og XP."
-                    );
-                }
-
-                await message.Channel.SendMessageAsync(embed: embed.Build());
-            }
-            catch (Exception ex)
-            {
-                await message.Channel.SendMessageAsync($"Der opstod en fejl: {ex.Message}");
-            }
         }
     }
 

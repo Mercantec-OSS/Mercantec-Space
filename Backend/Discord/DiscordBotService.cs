@@ -10,6 +10,12 @@ public class DiscordBotService
     private readonly DiscordSocketClient _client;
     private readonly string _token;
     private readonly string _prefix = "!"; // Prefix for kommandoer
+    private readonly ulong _roleSelectionChannelId = 1358696771596980326;
+    private readonly Dictionary<string, ulong> _roleMap = new()
+{
+    { "👍", 1353709131500093532 }
+};
+    private readonly ulong _guildId = 1351185531836436541;
     private readonly IServiceProvider _serviceProvider;
     private readonly XPService _xpService;
     private readonly Dictionary<ulong, DateTime> _voiceUsers = new Dictionary<ulong, DateTime>();
@@ -20,7 +26,7 @@ public class DiscordBotService
         _client = new DiscordSocketClient(
             new DiscordSocketConfig
             {
-                GatewayIntents = GatewayIntents.AllUnprivileged | GatewayIntents.MessageContent
+                GatewayIntents = GatewayIntents.AllUnprivileged | GatewayIntents.MessageContent | GatewayIntents.GuildMembers
             }
         );
 
@@ -33,14 +39,22 @@ public class DiscordBotService
     public async Task StartAsync()
     {
         _client.Log += LogAsync;
-        _client.Ready += () =>
+        _client.Ready += async () =>
         {
             Console.WriteLine($"Bot er forbundet til {_client.Guilds.Count} servere!");
             foreach (var guild in _client.Guilds)
             {
                 Console.WriteLine($" - {guild.Name} (ID: {guild.Id})");
             }
-            return Task.CompletedTask;
+
+            var channel = _client.GetChannel(_roleSelectionChannelId) as SocketTextChannel;
+
+            if (channel != null)
+            {
+                await SendRoleMessageAsync(channel);
+            }
+
+            return;
         };
 
         // Tilføj message handler
@@ -50,6 +64,14 @@ public class DiscordBotService
         _client.MessageReceived += HandleMessageXpAsync;
         _client.ReactionAdded += HandleReactionXpAsync;
         _client.UserVoiceStateUpdated += HandleVoiceXpAsync;
+      
+        // Tilføj reaction handlers
+        _client.ReactionAdded += ReactionAddedAsync;
+        _client.ReactionRemoved += ReactionRemovedAsync;
+
+        // Registrer bruger 
+        _client.UserJoined += HandleRegisterAsync;
+
 
         await _client.LoginAsync(TokenType.Bot, _token);
         await _client.StartAsync();
@@ -81,6 +103,57 @@ public class DiscordBotService
             await message.Channel.SendMessageAsync(
                 $"Ukendt kommando. Skriv `{_prefix}help` for at se tilgængelige kommandoer."
             );
+        }
+    }
+
+    private async Task SendRoleMessageAsync(SocketTextChannel channel)
+    {
+        var messages = await channel.GetMessagesAsync(50).FlattenAsync();
+        var existing = messages.FirstOrDefault(m =>
+            m.Author.Id == _client.CurrentUser.Id &&
+            m.Content.Contains("Get roles corresponding to reactions"));
+
+        if (existing != null) return;
+
+        var newMessage = await channel.SendMessageAsync("Get roles corresponding to reactions");
+        await newMessage.AddReactionAsync(new Emoji("👍"));
+    }
+
+    private async Task ReactionAddedAsync(Cacheable<IUserMessage, ulong> cachedMessage,
+                                      Cacheable<IMessageChannel, ulong> cachedChannel,
+                                      SocketReaction reaction)
+    {
+        if (reaction.User.Value.IsBot) return;
+
+        if (_roleMap.TryGetValue(reaction.Emote.Name, out ulong roleId))
+        {
+            var guild = _client.GetGuild(_guildId);
+            var user = guild.GetUser(reaction.UserId);
+            var role = guild.GetRole(roleId);
+
+            if (role != null && user != null)
+            {
+                await user.AddRoleAsync(role);
+            }
+        }
+    }
+
+    private async Task ReactionRemovedAsync(Cacheable<IUserMessage, ulong> cachedMessage,
+                                            Cacheable<IMessageChannel, ulong> cachedChannel,
+                                            SocketReaction reaction)
+    {
+        if (reaction.User.Value.IsBot) return;
+
+        if (_roleMap.TryGetValue(reaction.Emote.Name, out ulong roleId))
+        {
+            var guild = _client.GetGuild(_guildId);
+            var user = guild.GetUser(reaction.UserId);
+            var role = guild.GetRole(roleId);
+
+            if (role != null && user != null)
+            {
+                await user.RemoveRoleAsync(role);
+            }
         }
     }
 
@@ -182,6 +255,49 @@ public class DiscordBotService
         }
     }
 
+    private async Task HandleRegisterAsync(SocketGuildUser guildUser)
+    {
+        if (_serviceProvider == null)
+        {
+            await guildUser.SendMessageAsync("Fejl: Service provider er ikke konfigureret.");
+            return;
+        }
+
+        using var scope = _serviceProvider.CreateScope();
+        var userService = scope.ServiceProvider.GetRequiredService<UserService>();
+        var xpService = scope.ServiceProvider.GetRequiredService<XPService>();
+
+        try
+        {
+            var user = await userService.CreateDiscordUserAsync(guildUser);
+            bool isNewUser = user.CreatedAt > DateTime.UtcNow.AddMinutes(-1);
+
+            var embed = new EmbedBuilder()
+                .WithTitle(isNewUser ? "Velkommen til Mercantec Space!" : "Du er allerede registreret!")
+                .WithDescription(
+                    isNewUser
+                        ? "Din Discord-konto er nu registreret i vores system. Du kan nu optjene XP og stige i level!"
+                        : "Din Discord-konto er allerede registreret i vores system."
+                )
+                .WithColor(isNewUser ? Color.Green : Color.Blue)
+                .WithThumbnailUrl(guildUser.GetAvatarUrl() ?? guildUser.GetDefaultAvatarUrl())
+                .WithCurrentTimestamp();
+
+            if (isNewUser)
+            {
+                await xpService.AddXPAsync(guildUser.Id.ToString(), XPActivityType.DailyLogin);
+                embed.AddField("Næste skridt", "Senere vil du kunne forbinde din konto med vores hjemmeside for at få adgang til flere funktioner.");
+                embed.AddField("XP System", "Du optjener XP ved at være aktiv på serveren. Brug !rank for at se dit level og XP.");
+            }
+
+            await guildUser.SendMessageAsync(embed: embed.Build());
+        }
+        catch (Exception ex)
+        {
+            await guildUser.SendMessageAsync($"Der opstod en fejl under registrering: {ex.Message}");
+        }
+    }
+
     private Task LogAsync(LogMessage log)
     {
         Console.WriteLine(log);
@@ -243,6 +359,7 @@ public class DiscordBotService
         await _client.LogoutAsync();
         await _client.StopAsync();
     }
+
 }
 
 public class DiscordHostedService : IHostedService
@@ -264,3 +381,5 @@ public class DiscordHostedService : IHostedService
         await _discordBotService.StopAsync();
     }
 }
+
+
